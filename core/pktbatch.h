@@ -9,6 +9,8 @@ class Packet;
 
 class PacketBatch {
  public:
+  static constexpr size_t kMaxBurst = 32;
+
   int cnt() const { return cnt_; }
   void set_cnt(int cnt) { cnt_ = cnt; }
   void incr_cnt(int n = 1) { cnt_ += n; }
@@ -32,8 +34,6 @@ class PacketBatch {
                reinterpret_cast<const void *>(src->pkts_),
                cnt * sizeof(Packet *));
   }
-
-  static const size_t kMaxBurst = 32;
 
  private:
   int cnt_;
