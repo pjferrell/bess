@@ -242,6 +242,10 @@ message NATArg {
   repeated Rule rules = 1;
 }
 
+message NetBricksArg{
+  string file = 1;
+}
+
 message NoOpArg {
 }
 
