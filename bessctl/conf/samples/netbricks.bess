@@ -1,0 +1,14 @@
+import scapy.all as scapy
+
+eth = scapy.Ether(dst='00:02:15:37:a2:44', src='00:ae:f3:52:aa:d1')
+ip = scapy.IP()
+udp = scapy.UDP()
+payload = 'Hello World'
+
+test_packet = str(eth/ip/udp/payload)
+
+# Replace "..." with an absolute path to the .so file.
+# Also make sure that "libzcsi.so" file is reachable (e.g., LD_LIBRARY_PATH)
+Source() -> Rewrite(templates=[test_packet]) \
+    -> NetBricks(file='...') \
+    -> Sink()
