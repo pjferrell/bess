@@ -4,9 +4,15 @@
 
 #include <memory>
 
+#include "../mem_alloc.h"
+
 pb_error_t NetBricks::Init(const bess::pb::NetBricksArg &arg) {
-  if (arg.file() == "")
-    return pb_error(EINVAL, "'file' must be given");
+  static_assert(NetBricks::kBufSize >= bess::PacketBatch::kMaxBurst,
+                "kBufSize is too small");
+
+  if (arg.file() == "") {
+    return pb_error(EINVAL, "'file' must be specified");
+  }
 
   // Make sure "file" (libxxx.so) is available
   handle_ = dlmopen(LM_ID_NEWLM, arg.file().c_str(), RTLD_LAZY);
@@ -20,30 +26,38 @@ pb_error_t NetBricks::Init(const bess::pb::NetBricksArg &arg) {
     return pb_error(EINVAL, "run_once() is not found: %s", dlerror());
   }
 
+  num_gates_ = arg.num_gates();
+  if (num_gates_ < 1) {
+    num_gates_ = 1;
+  }
+
   return InitNetBricks();
 }
 
 pb_error_t NetBricks::InitNetBricks() {
-  rx_buf_ = {
-    .capacity = kBufSize,
-    .cnt = 0,
-    .pkts = alloc_.allocate(kBufSize),
-  };
+  rx_buf_ptrs_ = (PacketBuf **)mem_alloc(sizeof(PacketBuf *) * num_gates_);
+  tx_buf_ptrs_ = (PacketBuf **)mem_alloc(sizeof(PacketBuf *) * num_gates_);
 
-  tx_buf_ = {
-    .capacity = kBufSize,
-    .cnt = 0,
-    .pkts = alloc_.allocate(kBufSize),
-  };
+  for (size_t i = 0; i < num_gates_; i++) {
+    rx_buf_ptrs_[i] = (PacketBuf *)mem_alloc(sizeof(PacketBuf));
+    rx_buf_ptrs_[i]->capacity = kBufSize;
+    rx_buf_ptrs_[i]->cnt = 0;
+    rx_buf_ptrs_[i]->pkts = alloc_.allocate(kBufSize);
 
-  void *(*init_mod)(PacketBuf *, PacketBuf *);
-  init_mod = reinterpret_cast<void *(*)(PacketBuf *, PacketBuf *)>(
+    tx_buf_ptrs_[i] = (PacketBuf *)mem_alloc(sizeof(PacketBuf));
+    tx_buf_ptrs_[i]->capacity = kBufSize;
+    tx_buf_ptrs_[i]->cnt = 0;
+    tx_buf_ptrs_[i]->pkts = alloc_.allocate(kBufSize);
+  }
+
+  void *(*init_mod)(size_t, PacketBuf **, PacketBuf **);
+  init_mod = reinterpret_cast<void *(*)(size_t, PacketBuf **, PacketBuf **)>(
       dlsym(handle_, "init_mod"));
   if (!init_mod) {
     return pb_error(EINVAL, "init_mod() is not found: %s", dlerror());
   }
 
-  ctx_ = init_mod(&rx_buf_, &tx_buf_);
+  ctx_ = init_mod(num_gates_, rx_buf_ptrs_, tx_buf_ptrs_);
   if (!ctx_) {
     return pb_error(EINVAL, "init_mod() failed");
   }
@@ -58,29 +72,46 @@ void NetBricks::DeInit() {
     }
   }
 
-  alloc_.deallocate(rx_buf_.pkts, kBufSize);
-  alloc_.deallocate(tx_buf_.pkts, kBufSize);
+  for (size_t i = 0; i < num_gates_; i++) {
+    alloc_.deallocate(rx_buf_ptrs_[i]->pkts, kBufSize);
+    alloc_.deallocate(tx_buf_ptrs_[i]->pkts, kBufSize);
+
+    mem_free(rx_buf_ptrs_[i]);
+    mem_free(tx_buf_ptrs_[i]);
+  }
+
+  mem_free(rx_buf_ptrs_);
+  mem_free(tx_buf_ptrs_);
 }
 
 void NetBricks::ProcessBatch(bess::PacketBatch *batch) {
-  //gate_idx_t igate = get_igate();
+  gate_idx_t igate = get_igate();
+  if (igate >= num_gates_) {
+    bess::Packet::Free(batch);
+    return;
+  }
 
-  rx_buf_.cnt = batch->cnt();
-  rte_memcpy(rx_buf_.pkts, batch->pkts(), sizeof(bess::Packet *) * rx_buf_.cnt);
+  PacketBuf *rx_buf = rx_buf_ptrs_[get_igate()];
+
+  rx_buf->cnt = batch->cnt();
+  rte_memcpy(rx_buf->pkts, batch->pkts(), sizeof(bess::Packet *) * rx_buf->cnt);
 
   func_run_(ctx_);
 
-  bess::Packet **ptr = tx_buf_.pkts;
-  while (tx_buf_.cnt > 0) {
-    int pkts_in_batch = std::min(bess::PacketBatch::kMaxBurst, tx_buf_.cnt);
+  for (size_t i = 0; i < num_gates_; i++) {
+    PacketBuf *tx_buf = tx_buf_ptrs_[i];
+    bess::Packet **ptr = tx_buf->pkts;
+    while (tx_buf->cnt > 0) {
+      int pkts_in_batch = std::min(bess::PacketBatch::kMaxBurst, tx_buf->cnt);
 
-    rte_memcpy(batch->pkts(), ptr, sizeof(bess::Packet *) * pkts_in_batch);
-    batch->set_cnt(pkts_in_batch);
+      rte_memcpy(batch->pkts(), ptr, sizeof(bess::Packet *) * pkts_in_batch);
+      batch->set_cnt(pkts_in_batch);
 
-    tx_buf_.cnt -= pkts_in_batch;
-    ptr += pkts_in_batch;
+      tx_buf->cnt -= pkts_in_batch;
+      ptr += pkts_in_batch;
 
-    RunNextModule(batch);
+      RunChooseModule(i, batch);
+    }
   }
 }
 
