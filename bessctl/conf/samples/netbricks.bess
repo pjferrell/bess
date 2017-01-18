@@ -8,7 +8,8 @@ payload = 'Hello World'
 test_packet = str(eth/ip/udp/payload)
 
 # Replace "..." with an absolute path to the .so file.
-nb = NetBricks(num_gates=2, file='/home/sangjin/netbricks/target/release/deps/libbessnb-4214133dbcab3197.so')
+nb = NetBricks(num_gates=2, file='/home/vagrant/att-milestone3-scripts/netbricks-nfs/rate_limiter/target/release/deps/libbessnb-81b0cc008770846f.so',
+               env={'LIMIT_PACKETS': '1', 'LIMIT': '1000000'})
 
 Source(burst=32) -> Rewrite(templates=[test_packet]) -> 0:nb:0 -> Sink()
 Source(burst=16) -> Rewrite(templates=[test_packet]) -> 1:nb:1 -> Sink()

@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 
+#include <cstdlib>
 #include <memory>
 
 #include "../mem_alloc.h"
@@ -12,6 +13,10 @@ pb_error_t NetBricks::Init(const bess::pb::NetBricksArg &arg) {
 
   if (arg.file() == "") {
     return pb_error(EINVAL, "'file' must be specified");
+  }
+
+  for (const auto &it : arg.env()) {
+    setenv(it.first.c_str(), it.second.c_str(), 1);
   }
 
   // Make sure "file" (libxxx.so) is available

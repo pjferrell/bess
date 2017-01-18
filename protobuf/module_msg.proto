@@ -245,6 +245,7 @@ message NATArg {
 message NetBricksArg{
   string file = 1;
   uint64 num_gates = 2;
+  map<string, string> env = 3; 
 }
 
 message NoOpArg {
