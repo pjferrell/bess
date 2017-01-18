@@ -69,7 +69,13 @@ def parse_dict(values, message):
 
     for k, v in values.iteritems():
         if isinstance(v, dict):
-            parse_dict(v, getattr(message, k))
+            if hasattr(message, k):
+                print(k, v)
+                m = getattr(message, k)
+                for k2 in v:
+                    m[k2] = v[k2]
+            else:
+                parse_dict(v, getattr(message, k))
         elif isinstance(v, list):
             parse_list(v, getattr(message, k))
         elif v is not None:
