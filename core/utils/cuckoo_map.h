@@ -36,12 +36,95 @@ static inline bool DefaultEqFunc(const K& lhs, const K& rhs) {
   return lhs == rhs;
 }
 
-// Cuckoo HashMap implementation
+// A Hash table implementation using cuckoo hashing
+//
+// Example usage:
+//
+//  CuckooMap<uint32_t, uint64_t> cuckoo;
+//  cuckoo.Insert(1, 99);
+//  std::pair<uint32_t, uint64_t>* result = cuckoo.Find(1)
+//  std::cout << "key: " << result->first << ", value: "
+//    << result->second << std::endl;
+//
+// The output should be "key: 1, value: 99"
+//
+// For more examples, please refer to cuckoo_map_test.cc
+
 template <typename K, typename V, HashFunc<K> H = DefaultHashFunc,
           EqFunc<K> E = DefaultEqFunc>
 class CuckooMap {
  public:
   typedef std::pair<K, V> Entry;
+  class iterator {
+   public:
+    using difference_type = std::ptrdiff_t;
+    using value_type = Entry;
+    using pointer = Entry*;
+    using reference = Entry&;
+    using iterator_category = std::forward_iterator_tag;
+
+    iterator(CuckooMap& map, size_t bucket, size_t slot)
+        : map_(map), bucket_idx_(bucket), slot_idx_(slot) {
+      while (bucket_idx_ < map_.buckets_.size() &&
+             map_.buckets_[bucket_idx_].hash_values[slot_idx_] == 0) {
+        slot_idx_++;
+        if (slot_idx_ == kEntriesPerBucket) {
+          slot_idx_ = 0;
+          bucket_idx_++;
+        }
+      }
+    }
+
+    iterator& operator++() {  // Pre-increment
+      do {
+        slot_idx_++;
+        if (slot_idx_ == kEntriesPerBucket) {
+          slot_idx_ = 0;
+          bucket_idx_++;
+        }
+      } while (bucket_idx_ < map_.buckets_.size() &&
+               map_.buckets_[bucket_idx_].hash_values[slot_idx_] == 0);
+      return *this;
+    }
+
+    iterator operator++(int) {  // Pre-increment
+      iterator tmp(*this);
+      do {
+        slot_idx_++;
+        if (slot_idx_ == kEntriesPerBucket) {
+          slot_idx_ = 0;
+          bucket_idx_++;
+        }
+      } while (bucket_idx_ < map_.buckets_.size() &&
+               map_.buckets_[bucket_idx_].hash_values[slot_idx_] == 0);
+      return tmp;
+    }
+
+    bool operator==(const iterator& rhs) const {
+      return &map_ == &rhs.map_ && bucket_idx_ == rhs.bucket_idx_ &&
+             slot_idx_ == rhs.slot_idx_;
+    }
+
+    bool operator!=(const iterator& rhs) const {
+      return &map_ != &rhs.map_ || bucket_idx_ != rhs.bucket_idx_ ||
+             slot_idx_ != rhs.slot_idx_;
+    }
+
+    reference operator*() {
+      size_t idx = map_.buckets_[bucket_idx_].key_indices[slot_idx_];
+      return map_.entries_[idx];
+    }
+
+    pointer operator->() {
+      size_t idx = map_.buckets_[bucket_idx_].key_indices[slot_idx_];
+      return &map_.entries_[idx];
+    }
+
+   private:
+    CuckooMap& map_;
+    size_t bucket_idx_;
+    size_t slot_idx_;
+  };
 
   CuckooMap()
       : bucket_mask_(kInitNumBucket - 1),
@@ -54,6 +137,8 @@ class CuckooMap {
     }
   }
 
+  virtual ~CuckooMap() {}
+
   // Not allowing copying for now
   CuckooMap(CuckooMap&) = delete;
   CuckooMap& operator=(CuckooMap&) = delete;
@@ -61,6 +146,9 @@ class CuckooMap {
   // Allow move
   CuckooMap(CuckooMap&&) = default;
   CuckooMap& operator=(CuckooMap&&) = default;
+
+  iterator begin() { return iterator(*this, 0, 0); }
+  iterator end() { return iterator(*this, buckets_.size(), 0); }
 
   // Insert/update a key value pair
   // Return the pointer to the inserted entry
@@ -100,10 +188,29 @@ class CuckooMap {
     return false;
   }
 
+  void Clear() {
+    buckets_.clear();
+    entries_.clear();
+
+    // std::stack doesn't have a clear() method. Strange.
+    while (!free_entry_indices_.empty()) {
+      free_entry_indices_.pop();
+    }
+
+    num_entries_ = 0;
+    bucket_mask_ = kInitNumBucket - 1;
+    buckets_.resize(kInitNumBucket);
+    entries_.resize(kInitNumEntries);
+
+    for (int i = kInitNumEntries - 1; i >= 0; --i) {
+      free_entry_indices_.push(i);
+    }
+  }
+
   // Return the number of stored entries
   size_t Count() const { return num_entries_; }
 
- private:
+ protected:
   // Tunable macros
   static const int kInitNumBucket = 4;
   static const int kInitNumEntries = 16;
@@ -173,7 +280,7 @@ class CuckooMap {
 
     size_t idx = bucket.key_indices[slot_idx];
     Entry& entry = entries_[idx];
-    if (E(entry.first, key)) {
+    if (Eq(entry.first, key)) {
       bucket.hash_values[slot_idx] = 0;
       entry = Entry();
       PushFreeKeyIndex(idx);
@@ -195,7 +302,7 @@ class CuckooMap {
     }
 
     size_t idx = bucket.key_indices[slot_idx];
-    if (E(entries_[idx].first, key)) {
+    if (Eq(entries_[idx].first, key)) {
       return &entries_[idx];
     }
 
@@ -252,7 +359,8 @@ class CuckooMap {
     Bucket& bucket = buckets_[index];
 
     for (int i = 0; i < kEntriesPerBucket; i++) {
-      const K& key = bucket.key_indices[i];
+      size_t idx = bucket.key_indices[i];
+      const K& key = entries_[idx].first;
       size_t pri = Hash(key);
       size_t sec = HashSecondary(pri);
 
@@ -295,13 +403,15 @@ class CuckooMap {
   }
 
   // Secondary hash value
-  static size_t HashSecondary(uint32_t primary) {
+  size_t HashSecondary(uint32_t primary) {
     size_t tag = primary >> 12;
     return primary ^ ((tag + 1) * 0x5bd1e995);
   }
 
   // Primary hash value
-  static size_t Hash(const K& key) { return H(key, kHashInitval); }
+  virtual size_t Hash(const K& key) { return H(key, kHashInitval) | 1u << 31; }
+
+  virtual bool Eq(const K& rhs, const K& lhs) { return E(rhs, lhs); }
 
   // Resize the space of entries. Grow less aggressively than buckets.
   void ExpandEntries() {
@@ -334,6 +444,32 @@ class CuckooMap {
 
   // Stack of free entries
   std::stack<size_t> free_entry_indices_;
+};
+
+template <typename K>
+using HashFuncWithVariableKeySize = size_t (*)(const K& key, size_t init_val,
+                                               size_t key_size);
+
+template <typename K>
+using EqFuncWithVariableKeySize = bool (*)(const K& lhs, const K& rhs,
+                                           size_t key_size);
+
+template <typename K, typename V, HashFunc<K> H_, EqFunc<K> E_,
+          HashFuncWithVariableKeySize<K> H, EqFuncWithVariableKeySize<K> E>
+class CuckooMapWithVariableKeySize : public CuckooMap<K, V, H_, E_> {
+ public:
+  CuckooMapWithVariableKeySize() : key_size_(sizeof(K)) {}
+  void SetKeySize(size_t size) { key_size_ = size; }
+
+ private:
+  size_t Hash(const K& key) {
+    return H(key, CuckooMap<K, V, H_, E_>::kHashInitval, key_size_) | 1u << 31;
+  }
+
+  bool Eq(const K& rhs, const K& lhs) { return E(rhs, lhs, key_size_); }
+
+  // size of keys, in bytes
+  size_t key_size_;
 };
 
 }  // namespace utils

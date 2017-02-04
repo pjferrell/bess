@@ -6,7 +6,7 @@
 
 #include "../module.h"
 #include "../module_msg.pb.h"
-#include "../utils/htable.h"
+#include "../utils/cuckoo_map.h"
 
 #define MAX_FIELDS 8
 #define MAX_FIELD_SIZE 8
@@ -21,53 +21,53 @@ static_assert(MAX_FIELD_SIZE <= sizeof(uint64_t),
 #endif
 
 using google::protobuf::RepeatedPtrField;
-using bess::utils::HTable;
+using bess::utils::CuckooMap;
+using bess::utils::CuckooMapWithVariableKeySize;
 
 struct em_hkey_t {
   uint64_t u64_arr[MAX_FIELDS];
 };
 
-inline int em_keycmp(const void *key, const void *key_stored, size_t key_len) {
-  const uint64_t *a = ((em_hkey_t *)key)->u64_arr;
-  const uint64_t *b = ((em_hkey_t *)key_stored)->u64_arr;
+inline bool em_keyeq(const em_hkey_t &lhs, const em_hkey_t &rhs, size_t len) {
+  const uint64_t *a = lhs.u64_arr;
+  const uint64_t *b = rhs.u64_arr;
 
-  switch (key_len >> 3) {
+  switch (len >> 3) {
     default:
       promise_unreachable();
     case 8:
       if (unlikely(a[7] != b[7]))
-        return 1;
+        return false;
     case 7:
       if (unlikely(a[6] != b[6]))
-        return 1;
+        return false;
     case 6:
       if (unlikely(a[5] != b[5]))
-        return 1;
+        return false;
     case 5:
       if (unlikely(a[4] != b[4]))
-        return 1;
+        return false;
     case 4:
       if (unlikely(a[3] != b[3]))
-        return 1;
+        return false;
     case 3:
       if (unlikely(a[2] != b[2]))
-        return 1;
+        return false;
     case 2:
       if (unlikely(a[1] != b[1]))
-        return 1;
+        return false;
     case 1:
       if (unlikely(a[0] != b[0]))
-        return 1;
+        return false;
   }
-
-  return 0;
+  return true;
 }
 
-inline uint32_t em_hash(const void *key, uint32_t key_len, uint32_t init_val) {
+inline size_t em_hash(const em_hkey_t &key, size_t init_val, size_t len) {
 #if __SSE4_2__ && __x86_64
-  const uint64_t *a = ((em_hkey_t *)key)->u64_arr;
+  const uint64_t *a = key.u64_arr;
 
-  switch (key_len >> 3) {
+  switch (len >> 3) {
     default:
       promise_unreachable();
     case 8:
@@ -90,11 +90,21 @@ inline uint32_t em_hash(const void *key, uint32_t key_len, uint32_t init_val) {
 
   return init_val;
 #else
-  return rte_hash_crc(key, key_len, init_val);
+  return rte_hash_crc(key, key.key_len, init_val);
 #endif
 }
 
-typedef HTable<em_hkey_t, gate_idx_t, em_keycmp, em_hash> htable_t;
+inline bool em_keyeq_fixed(const em_hkey_t &lhs, const em_hkey_t &rhs) {
+  return em_keyeq(lhs, rhs, sizeof(em_hkey_t));
+}
+
+inline size_t em_hash_fixed(const em_hkey_t &key, size_t init_val) {
+  return em_hash(key, init_val, sizeof(em_hkey_t));
+}
+
+typedef CuckooMapWithVariableKeySize<em_hkey_t, gate_idx_t, em_hash_fixed,
+                                     em_keyeq_fixed, em_hash, em_keyeq>
+    htable_t;
 
 struct EmField {
   /* bits with 1: the bit must be considered.
@@ -125,8 +135,6 @@ class ExactMatch final : public Module {
         num_fields_(),
         fields_(),
         ht_() {}
-
-  void DeInit() override;
 
   void ProcessBatch(bess::PacketBatch *batch) override;
 

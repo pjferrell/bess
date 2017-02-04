@@ -1,5 +1,8 @@
 #include "wildcard_match.h"
 
+#include <string>
+#include <vector>
+
 #include "../utils/endian.h"
 #include "../utils/format.h"
 
@@ -110,13 +113,8 @@ pb_error_t WildcardMatch::Init(const bess::pb::WildcardMatchArg &arg) {
   return pb_errno(0);
 }
 
-void WildcardMatch::DeInit() {
-  for (auto &tuple : tuples_) {
-    tuple.ht.Close();
-  }
-}
-
-gate_idx_t WildcardMatch::LookupEntry(wm_hkey_t *key, gate_idx_t def_gate) {
+inline gate_idx_t WildcardMatch::LookupEntry(wm_hkey_t *key,
+                                             gate_idx_t def_gate) {
   struct WmData result = {
       .priority = INT_MIN, .ogate = def_gate,
   };
@@ -125,15 +123,12 @@ gate_idx_t WildcardMatch::LookupEntry(wm_hkey_t *key, gate_idx_t def_gate) {
 
   wm_hkey_t key_masked;
 
-  for (const auto &tuple : tuples_) {
-    struct WmData *cand;
-
+  for (auto &tuple : tuples_) {
     mask(&key_masked, key, &tuple.mask, key_size);
+    auto *entry = tuple.ht.Find(key_masked);
 
-    cand = static_cast<struct WmData *>(tuple.ht.Get(&key_masked));
-
-    if (cand && cand->priority >= result.priority) {
-      result = *cand;
+    if (entry && entry->second.priority >= result.priority) {
+      result = entry->second;
     }
   }
 
@@ -144,7 +139,7 @@ void WildcardMatch::ProcessBatch(bess::PacketBatch *batch) {
   gate_idx_t default_gate;
   gate_idx_t out_gates[bess::PacketBatch::kMaxBurst];
 
-  char keys[bess::PacketBatch::kMaxBurst][HASH_KEY_SIZE] __ymm_aligned;
+  wm_hkey_t keys[bess::PacketBatch::kMaxBurst] __ymm_aligned;
 
   int cnt = batch->cnt();
 
@@ -161,15 +156,15 @@ void WildcardMatch::ProcessBatch(bess::PacketBatch *batch) {
       offset = bess::Packet::mt_offset_to_databuf_offset(attr_offset(attr_id));
     }
 
-    char *key = keys[0] + pos;
-
-    for (int j = 0; j < cnt; j++, key += HASH_KEY_SIZE) {
+    for (int j = 0; j < cnt; j++) {
       char *buf_addr = batch->pkts()[j]->buffer<char *>();
 
       /* for offset-based attrs we use relative offset */
       if (attr_id < 0) {
         buf_addr += batch->pkts()[j]->data_off();
       }
+
+      char *key = reinterpret_cast<char *>(keys[j].u64_arr) + pos;
 
       *(reinterpret_cast<uint64_t *>(key)) =
           *(reinterpret_cast<uint64_t *>(buf_addr + offset));
@@ -178,8 +173,7 @@ void WildcardMatch::ProcessBatch(bess::PacketBatch *batch) {
 
 #if 1
   for (int i = 0; i < cnt; i++) {
-    out_gates[i] =
-        LookupEntry(reinterpret_cast<wm_hkey_t *>(keys[i]), default_gate);
+    out_gates[i] = LookupEntry(&keys[i], default_gate);
   }
 #else
   /* A version with an outer loop for tuples and an inner loop for pkts.
@@ -288,8 +282,6 @@ int WildcardMatch::FindTuple(wm_hkey_t *mask) {
 }
 
 int WildcardMatch::AddTuple(wm_hkey_t *mask) {
-  int ret;
-
   if (tuples_.size() >= MAX_TUPLES) {
     return -ENOSPC;
   }
@@ -297,18 +289,14 @@ int WildcardMatch::AddTuple(wm_hkey_t *mask) {
   tuples_.emplace_back();
   struct WmTuple &tuple = tuples_.back();
   memcpy(&tuple.mask, mask, sizeof(*mask));
-  ret = tuple.ht.Init(total_key_size_, sizeof(struct WmData));
-  if (ret < 0) {
-    tuple.ht.Close();
-    return ret;
-  }
+  tuple.ht.SetKeySize(total_key_size_);
 
   return int(tuples_.size() - 1);
 }
 
 int WildcardMatch::DelEntry(int idx, wm_hkey_t *key) {
   struct WmTuple &tuple = tuples_[idx];
-  int ret = tuple.ht.Del(key);
+  int ret = tuple.ht.Remove(*key);
   if (ret) {
     return ret;
   }
@@ -357,9 +345,9 @@ pb_cmd_response_t WildcardMatch::CommandAdd(
     }
   }
 
-  int ret = tuples_[idx].ht.Set(&key, &data);
-  if (ret < 0) {
-    set_cmd_response_error(&response, pb_error(-ret, "failed to add a rule"));
+  auto *ret = tuples_[idx].ht.Insert(key, data);
+  if (ret == nullptr) {
+    set_cmd_response_error(&response, pb_error(-1, "failed to add a rule"));
     return response;
   }
 

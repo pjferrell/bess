@@ -13,13 +13,13 @@
 
 #include "../module.h"
 #include "../module_msg.pb.h"
-#include "../utils/htable.h"
+#include "../utils/cuckoo_map.h"
 #include "../utils/ip.h"
 #include "../utils/random.h"
 
 using bess::utils::IPAddress;
 using bess::utils::CIDRNetwork;
-using bess::utils::HTable;
+using bess::utils::CuckooMap;
 
 const uint16_t MIN_PORT = 1024;
 const uint16_t MAX_PORT = 65535;
@@ -72,8 +72,8 @@ class alignas(16) Flow {
     }
   }
 
-  bool operator!=(const Flow &other) const {
-    return e1 != other.e1 || e2 != other.e2;
+  bool operator==(const Flow &other) const {
+    return e1 == other.e1 && e2 == other.e2;
   }
 
   std::string ToString() const;
@@ -148,19 +148,6 @@ class AvailablePorts {
   uint64_t next_expiry_;
 };
 
-struct FlowHash {
-  std::size_t operator()(const Flow &f) const {
-    uint32_t init_val = 0;
-#if __SSE4_2__ && __x86_64
-    init_val = crc32c_sse42_u64(f.e1, init_val);
-    init_val = crc32c_sse42_u64(f.e2, init_val);
-#else
-    init_val = rte_hash_crc(&flow, sizeof(Flow), init_val);
-#endif
-    return init_val;
-  }
-};
-
 // NAT module. 2 igates and 2 ogates
 // igate/ogate 0: traffic from internal network to external network
 // igate/ogate 1: traffic from external network to internal network
@@ -171,7 +158,6 @@ class NAT final : public Module {
   static const gate_idx_t kNumOGates = 2;
 
   pb_error_t Init(const bess::pb::NATArg &arg);
-  void DeInit() override;
 
   void ProcessBatch(bess::PacketBatch *batch) override;
 
@@ -189,25 +175,22 @@ class NAT final : public Module {
     }
   }
 
-  static inline int flow_keycmp(const void *key, const void *key_stored,
-                                size_t) {
-    return *(const Flow *)key != *(const Flow *)key_stored;
-  }
-
-  static inline uint32_t flow_hash(const void *key, uint32_t,
-                                   uint32_t init_val) {
+  static inline size_t FlowHash(const Flow &key, size_t init_val) {
 #if __SSE4_2__ && __x86_64
-    const Flow *flow = reinterpret_cast<const Flow *>(key);
-    init_val = crc32c_sse42_u64(flow->e1, init_val);
-    init_val = crc32c_sse42_u64(flow->e2, init_val);
+    init_val = crc32c_sse42_u64(key.e1, init_val);
+    init_val = crc32c_sse42_u64(key.e2, init_val);
 #else
     init_val = rte_hash_crc(key, sizeof(Flow), init_val);
 #endif
     return init_val;
   }
 
+  static inline bool FlowEq(const Flow &lhs, const Flow &rhs) {
+    return lhs == rhs;
+  }
+
   std::vector<std::pair<CIDRNetwork, AvailablePorts>> rules_;
-  HTable<Flow, FlowRecord *, flow_keycmp, flow_hash> flow_hash_;
+  CuckooMap<Flow, FlowRecord *, FlowHash, FlowEq> flow_hash_;
   Random rng_;
 };
 
