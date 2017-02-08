@@ -262,8 +262,8 @@ pb_cmd_response_t WildcardMatch::CommandAdd(
   gate_idx_t gate = arg.gate();
   int priority = arg.priority();
 
-  wm_hkey_t key = {};
-  wm_hkey_t mask = {};
+  wm_hkey_t key = {{0}};
+  wm_hkey_t mask = {{0}};
 
   struct WmData data;
 
