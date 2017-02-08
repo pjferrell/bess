@@ -22,90 +22,53 @@ static_assert(MAX_FIELD_SIZE <= sizeof(uint64_t),
 
 using google::protobuf::RepeatedPtrField;
 using bess::utils::HashResult;
-using bess::utils::CuckooMapWithVariableKeySize;
+using bess::utils::CuckooMap;
 
 struct em_hkey_t {
   uint64_t u64_arr[MAX_FIELDS];
 };
 
-inline bool em_keyeq(const em_hkey_t &lhs, const em_hkey_t &rhs, size_t len) {
-  const uint64_t *a = lhs.u64_arr;
-  const uint64_t *b = rhs.u64_arr;
+class em_eq {
+ public:
+  em_eq() : len_(sizeof(em_hkey_t)) {}
+  explicit em_eq(size_t len) : len_(len) {}
 
-  switch (len >> 3) {
-    default:
-      promise_unreachable();
-    case 8:
-      if (unlikely(a[7] != b[7]))
+  bool operator()(const em_hkey_t &lhs, const em_hkey_t &rhs) const {
+    promise(len_ > 0);
+    for (size_t i = 0; i < len_ / 8; i++) {
+      if (lhs.u64_arr[i] != rhs.u64_arr[i]) {
         return false;
-    case 7:
-      if (unlikely(a[6] != b[6]))
-        return false;
-    case 6:
-      if (unlikely(a[5] != b[5]))
-        return false;
-    case 5:
-      if (unlikely(a[4] != b[4]))
-        return false;
-    case 4:
-      if (unlikely(a[3] != b[3]))
-        return false;
-    case 3:
-      if (unlikely(a[2] != b[2]))
-        return false;
-    case 2:
-      if (unlikely(a[1] != b[1]))
-        return false;
-    case 1:
-      if (unlikely(a[0] != b[0]))
-        return false;
+      }
+    }
+    return true;
   }
-  return true;
-}
 
-inline HashResult em_hash(const em_hkey_t &key, size_t len) {
-  HashResult init_val = 0;
+ private:
+  size_t len_;
+};
+
+class em_hash {
+ public:
+  explicit em_hash(size_t len) : len_(len) {}
+
+  HashResult operator()(const em_hkey_t &key) const {
+    HashResult init_val = 0;
+    promise(len_ > 0);
 #if __SSE4_2__ && __x86_64
-  const uint64_t *a = key.u64_arr;
-
-  switch (len >> 3) {
-    default:
-      promise_unreachable();
-    case 8:
-      init_val = crc32c_sse42_u64(*a++, init_val);
-    case 7:
-      init_val = crc32c_sse42_u64(*a++, init_val);
-    case 6:
-      init_val = crc32c_sse42_u64(*a++, init_val);
-    case 5:
-      init_val = crc32c_sse42_u64(*a++, init_val);
-    case 4:
-      init_val = crc32c_sse42_u64(*a++, init_val);
-    case 3:
-      init_val = crc32c_sse42_u64(*a++, init_val);
-    case 2:
-      init_val = crc32c_sse42_u64(*a++, init_val);
-    case 1:
-      init_val = crc32c_sse42_u64(*a++, init_val);
+    for (size_t i = 0; i < len_ / 8; i++) {
+      init_val = crc32c_sse42_u64(key.u64_arr[i], init_val);
+    }
+    return init_val;
+#else
+    return rte_hash_crc(&key, key.key_len, init_val);
+#endif
   }
 
-  return init_val;
-#else
-  return rte_hash_crc(key, key.key_len, init_val);
-#endif
-}
+ private:
+  size_t len_;
+};
 
-inline bool em_keyeq_fixed(const em_hkey_t &lhs, const em_hkey_t &rhs) {
-  return em_keyeq(lhs, rhs, sizeof(em_hkey_t));
-}
-
-inline HashResult em_hash_fixed(const em_hkey_t &key) {
-  return em_hash(key, sizeof(em_hkey_t));
-}
-
-typedef CuckooMapWithVariableKeySize<em_hkey_t, gate_idx_t, em_hash_fixed,
-                                     em_keyeq_fixed, em_hash, em_keyeq>
-    htable_t;
+typedef CuckooMap<em_hkey_t, gate_idx_t, em_hash, em_eq> htable_t;
 
 struct EmField {
   /* bits with 1: the bit must be considered.

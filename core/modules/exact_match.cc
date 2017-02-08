@@ -83,7 +83,6 @@ pb_error_t ExactMatch::Init(const bess::pb::ExactMatchArg &arg) {
   default_gate_ = DROP_GATE;
   num_fields_ = arg.fields_size();
   total_key_size_ = align_ceil(size_acc, sizeof(uint64_t));
-  ht_.SetKeySize(total_key_size_);
 
   return pb_errno(0);
 }
@@ -130,7 +129,8 @@ void ExactMatch::ProcessBatch(bess::PacketBatch *batch) {
   }
 
   for (int i = 0; i < cnt; i++) {
-    auto *entry = ht_.Find(keys[i]);
+    auto *entry =
+        ht_.Find(keys[i], em_hash(total_key_size_), em_eq(total_key_size_));
     out_gates[i] = entry ? entry->second : default_gate;
   }
 
@@ -192,7 +192,7 @@ pb_cmd_response_t ExactMatch::CommandAdd(
     return response;
   }
 
-  ht_.Insert(key, gate);
+  ht_.Insert(key, gate, em_hash(total_key_size_), em_eq(total_key_size_));
 
   set_cmd_response_error(&response, pb_errno(0));
   return response;
@@ -217,7 +217,7 @@ pb_cmd_response_t ExactMatch::CommandDelete(
     return response;
   }
 
-  bool ret = ht_.Remove(key);
+  bool ret = ht_.Remove(key, em_hash(total_key_size_), em_eq(total_key_size_));
   if (!ret) {
     set_cmd_response_error(&response, pb_error(-1, "ht_del() failed"));
     return response;

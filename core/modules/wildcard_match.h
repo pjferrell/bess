@@ -10,7 +10,7 @@
 #include "../utils/cuckoo_map.h"
 
 using bess::utils::HashResult;
-using bess::utils::CuckooMapWithVariableKeySize;
+using bess::utils::CuckooMap;
 
 #define MAX_TUPLES 8
 #define MAX_FIELDS 8
@@ -45,6 +45,49 @@ struct wm_hkey_t {
   uint64_t u64_arr[MAX_FIELDS];
 };
 
+class wm_eq {
+ public:
+  explicit wm_eq(size_t len) : len_(len) {}
+
+  bool operator()(const wm_hkey_t &lhs, const wm_hkey_t &rhs) const {
+    promise(len_ > 0);
+    for (size_t i = 0; i < len_ / 8; i++) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+      if (lhs.u64_arr[i] != rhs.u64_arr[i]) {
+#pragma GCC diagnostic pop
+        return false;
+      }
+    }
+    return true;
+  }
+
+ private:
+  size_t len_;
+};
+
+class wm_hash {
+ public:
+  wm_hash() : len_(sizeof(wm_hkey_t)) {}
+  explicit wm_hash(size_t len) : len_(len) {}
+
+  HashResult operator()(const wm_hkey_t &key) const {
+    HashResult init_val = 0;
+    promise(len_ > 0);
+#if __SSE4_2__ && __x86_64
+    for (size_t i = 0; i < len_ / 8; i++) {
+      init_val = crc32c_sse42_u64(key.u64_arr[i], init_val);
+    }
+    return init_val;
+#else
+    return rte_hash_crc(&key, key.key_len, init_val);
+#endif
+  }
+
+ private:
+  size_t len_;
+};
+
 class WildcardMatch final : public Module {
  public:
   static const gate_idx_t kNumOGates = MAX_GATES;
@@ -68,41 +111,8 @@ class WildcardMatch final : public Module {
       const bess::pb::WildcardMatchCommandSetDefaultGateArg &arg);
 
  private:
-  static bool wm_keyeq(const wm_hkey_t &lhs, const wm_hkey_t &rhs, size_t len) {
-    promise(len > 0);
-    for (size_t i = 0; i < len / 8; i++) {
-      if (lhs.u64_arr[i] != rhs.u64_arr[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  static HashResult wm_hash(const wm_hkey_t &key, size_t len) {
-    HashResult init_val = 0;
-    promise(len > 0);
-#if __SSE4_2__ && __x86_64
-    for (size_t i = 0; i < len / 8; i++) {
-      init_val = crc32c_sse42_u64(key.u64_arr[i], init_val);
-    }
-    return init_val;
-#else
-    return rte_hash_crc(&key, key.key_len, init_val);
-#endif
-  }
-
-  static bool wm_keyeq_fixed(const wm_hkey_t &lhs, const wm_hkey_t &rhs) {
-    return wm_keyeq(lhs, rhs, sizeof(wm_hkey_t));
-  }
-
-  static HashResult wm_hash_fixed(const wm_hkey_t &key) {
-    return wm_hash(key, sizeof(wm_hkey_t));
-  }
-
   struct WmTuple {
-    CuckooMapWithVariableKeySize<wm_hkey_t, struct WmData, wm_hash_fixed,
-                                 wm_keyeq_fixed, wm_hash, wm_keyeq>
-        ht;
+    CuckooMap<wm_hkey_t, struct WmData, wm_hash, wm_eq> ht;
     wm_hkey_t mask;
   };
 

@@ -104,7 +104,9 @@ inline gate_idx_t WildcardMatch::LookupEntry(const wm_hkey_t &key,
 
   for (auto &tuple : tuples_) {
     mask(&key_masked, key, tuple.mask, total_key_size_);
-    auto *entry = tuple.ht.Find(key_masked);
+
+    auto *entry = tuple.ht.Find(key_masked, wm_hash(total_key_size_),
+                                wm_eq(total_key_size_));
 
     if (entry && entry->second.priority >= result.priority) {
       result = entry->second;
@@ -236,14 +238,14 @@ int WildcardMatch::AddTuple(wm_hkey_t *mask) {
   tuples_.emplace_back();
   struct WmTuple &tuple = tuples_.back();
   memcpy(&tuple.mask, mask, sizeof(*mask));
-  tuple.ht.SetKeySize(total_key_size_);
 
   return int(tuples_.size() - 1);
 }
 
 int WildcardMatch::DelEntry(int idx, wm_hkey_t *key) {
   struct WmTuple &tuple = tuples_[idx];
-  int ret = tuple.ht.Remove(*key);
+  int ret =
+      tuple.ht.Remove(*key, wm_hash(total_key_size_), wm_eq(total_key_size_));
   if (ret) {
     return ret;
   }
@@ -292,7 +294,8 @@ pb_cmd_response_t WildcardMatch::CommandAdd(
     }
   }
 
-  auto *ret = tuples_[idx].ht.Insert(key, data);
+  auto *ret = tuples_[idx].ht.Insert(key, data, wm_hash(total_key_size_),
+                                     wm_eq(total_key_size_));
   if (ret == nullptr) {
     set_cmd_response_error(&response, pb_error(-1, "failed to add a rule"));
     return response;

@@ -5,6 +5,7 @@
 #define BESS_UTILS_CUCKOOMAP_H_
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <stack>
 #include <utility>
@@ -21,24 +22,6 @@ namespace utils {
 typedef uint32_t HashResult;
 typedef uint32_t EntryIndex;
 
-// Hash function. Return HashResult as the hash code. May return 0.
-template <typename K>
-using HashFunc = HashResult (*)(const K& key);
-
-// Compare function. Return true if the lhs and rhs are identical.
-template <typename K>
-using EqFunc = bool (*)(const K& lhs, const K& rhs);
-
-template <typename K>
-static inline HashResult DefaultHashFunc(const K& key) {
-  return std::hash<K>()(key);
-}
-
-template <typename K>
-static inline bool DefaultEqFunc(const K& lhs, const K& rhs) {
-  return lhs == rhs;
-}
-
 // A Hash table implementation using cuckoo hashing
 //
 // Example usage:
@@ -53,8 +36,8 @@ static inline bool DefaultEqFunc(const K& lhs, const K& rhs) {
 //
 // For more examples, please refer to cuckoo_map_test.cc
 
-template <typename K, typename V, HashFunc<K> H = DefaultHashFunc,
-          EqFunc<K> E = DefaultEqFunc>
+template <typename K, typename V, typename H = std::hash<K>,
+          typename E = std::equal_to<K>>
 class CuckooMap {
  public:
   typedef std::pair<K, V> Entry;
@@ -140,8 +123,6 @@ class CuckooMap {
     }
   }
 
-  virtual ~CuckooMap() {}
-
   // Not allowing copying for now
   CuckooMap(CuckooMap&) = delete;
   CuckooMap& operator=(CuckooMap&) = delete;
@@ -155,10 +136,11 @@ class CuckooMap {
 
   // Insert/update a key value pair
   // Return the pointer to the inserted entry
-  Entry* Insert(const K& key, const V& value) {
-    HashResult primary = Hash(key);
+  Entry* Insert(const K& key, const V& value, const H& hasher = H(),
+                const E& eq = E()) {
+    HashResult primary = Hash(key, hasher);
 
-    Entry* entry = FindWithHash(primary, key);
+    Entry* entry = FindWithHash(primary, key, eq);
     if (entry) {
       entry->second = value;
       return entry;
@@ -166,7 +148,8 @@ class CuckooMap {
 
     HashResult secondary = HashSecondary(primary);
 
-    while ((entry = AddEntry(primary, secondary, key, value)) == nullptr) {
+    while ((entry = AddEntry(primary, secondary, key, value, hasher)) ==
+           nullptr) {
       // expand the table as the last resort
       ExpandBuckets();
     }
@@ -175,17 +158,19 @@ class CuckooMap {
 
   // Find the pointer to the stored value by the key.
   // Return nullptr if not exist.
-  Entry* Find(const K& key) { return FindWithHash(Hash(key), key); }
+  Entry* Find(const K& key, const H& hasher = H(), const E& eq = E()) {
+    return FindWithHash(Hash(key, hasher), key, eq);
+  }
 
   // Remove the stored entry by the key
   // Return false if not exist.
-  bool Remove(const K& key) {
-    HashResult pri = Hash(key);
-    if (RemoveFromBucket(pri, pri & bucket_mask_, key)) {
+  bool Remove(const K& key, const H& hasher = H(), const E& eq = E()) {
+    HashResult pri = Hash(key, hasher);
+    if (RemoveFromBucket(pri, pri & bucket_mask_, key, eq)) {
       return true;
     }
     HashResult sec = HashSecondary(pri);
-    if (RemoveFromBucket(pri, sec & bucket_mask_, key)) {
+    if (RemoveFromBucket(pri, sec & bucket_mask_, key, eq)) {
       return true;
     }
     return false;
@@ -247,7 +232,8 @@ class CuckooMap {
 
   // Try to add (key, value) to the bucket indexed by bucket_idx
   // Return the pointer to the entry if success. Otherwise return nullptr.
-  Entry* AddToBucket(HashResult bucket_idx, const K& key, const V& value) {
+  Entry* AddToBucket(HashResult bucket_idx, const K& key, const V& value,
+                     const H& hasher) {
     Bucket& bucket = buckets_[bucket_idx];
     int slot_idx = FindSlot(bucket, 0);
 
@@ -257,7 +243,7 @@ class CuckooMap {
 
     EntryIndex free_idx = PopFreeEntryIndex();
 
-    bucket.hash_values[slot_idx] = Hash(key);
+    bucket.hash_values[slot_idx] = Hash(key, hasher);
     bucket.entry_indices[slot_idx] = free_idx;
 
     Entry& entry = entries_[free_idx];
@@ -270,8 +256,8 @@ class CuckooMap {
 
   // Remove key from the bucket indexed by bucket_idx
   // Return true if success.
-  bool RemoveFromBucket(HashResult primary, HashResult bucket_idx,
-                        const K& key) {
+  bool RemoveFromBucket(HashResult primary, HashResult bucket_idx, const K& key,
+                        const E& eq) {
     Bucket& bucket = buckets_[bucket_idx];
 
     int slot_idx = FindSlot(bucket, primary);
@@ -281,7 +267,7 @@ class CuckooMap {
 
     EntryIndex idx = bucket.entry_indices[slot_idx];
     Entry& entry = entries_[idx];
-    if (Eq(entry.first, key)) {
+    if (Eq(entry.first, key, eq)) {
       bucket.hash_values[slot_idx] = 0;
       entry = Entry();
       PushFreeEntryIndex(idx);
@@ -294,8 +280,8 @@ class CuckooMap {
 
   // Remove key from the bucket indexed by bucket_idx
   // Return the pointer to the entry if success. Otherwise return nullptr.
-  Entry* GetFromBucket(HashResult primary, HashResult bucket_idx,
-                       const K& key) {
+  Entry* GetFromBucket(HashResult primary, HashResult bucket_idx, const K& key,
+                       const E& eq) {
     const Bucket& bucket = buckets_[bucket_idx];
 
     int slot_idx = FindSlot(bucket, primary);
@@ -304,7 +290,7 @@ class CuckooMap {
     }
 
     EntryIndex idx = bucket.entry_indices[slot_idx];
-    if (Eq(entries_[idx].first, key)) {
+    if (Eq(entries_[idx].first, key, eq)) {
       return &entries_[idx];
     }
 
@@ -314,25 +300,27 @@ class CuckooMap {
   // Try to add the entry (key, value)
   // Return the pointer to the entry if success. Otherwise return nullptr.
   Entry* AddEntry(HashResult primary, HashResult secondary, const K& key,
-                  const V& value) {
+                  const V& value, const H& hasher) {
     HashResult primary_bucket_index, secondary_bucket_index;
     Entry* entry = nullptr;
   again:
     primary_bucket_index = primary & bucket_mask_;
-    if ((entry = AddToBucket(primary_bucket_index, key, value)) != nullptr) {
+    if ((entry = AddToBucket(primary_bucket_index, key, value, hasher)) !=
+        nullptr) {
       return entry;
     }
 
     secondary_bucket_index = secondary & bucket_mask_;
-    if ((entry = AddToBucket(secondary_bucket_index, key, value)) != nullptr) {
+    if ((entry = AddToBucket(secondary_bucket_index, key, value, hasher)) !=
+        nullptr) {
       return entry;
     }
 
-    if (MakeSpace(primary_bucket_index, 0) >= 0) {
+    if (MakeSpace(primary_bucket_index, 0, hasher) >= 0) {
       goto again;
     }
 
-    if (MakeSpace(secondary_bucket_index, 0) >= 0) {
+    if (MakeSpace(secondary_bucket_index, 0, hasher) >= 0) {
       goto again;
     }
 
@@ -353,7 +341,7 @@ class CuckooMap {
   // Recursively try making an empty slot in the bucket
   // Returns a slot index in [0, kEntriesPerBucket) for successful operation,
   // or -1 if failed.
-  int MakeSpace(HashResult index, int depth) {
+  int MakeSpace(HashResult index, int depth, const H& hasher) {
     if (depth >= kMaxCuckooPath) {
       return -1;
     }
@@ -363,7 +351,7 @@ class CuckooMap {
     for (int i = 0; i < kEntriesPerBucket; i++) {
       EntryIndex idx = bucket.entry_indices[i];
       const K& key = entries_[idx].first;
-      HashResult pri = Hash(key);
+      HashResult pri = Hash(key, hasher);
       HashResult sec = HashSecondary(pri);
 
       HashResult alt_index;
@@ -380,7 +368,7 @@ class CuckooMap {
       // Find empty slot
       int j = FindSlot(buckets_[alt_index], 0);
       if (j == -1) {
-        j = MakeSpace(alt_index, depth + 1);
+        j = MakeSpace(alt_index, depth + 1, hasher);
       }
       if (j >= 0) {
         Bucket& alt_bucket = buckets_[alt_index];
@@ -396,12 +384,13 @@ class CuckooMap {
 
   // Get the entry given the primary hash value of the key.
   // Returns the pointer to the entry or nullptr if failed.
-  Entry* FindWithHash(HashResult primary, const K& key) {
-    Entry* ret = GetFromBucket(primary, primary & bucket_mask_, key);
+  Entry* FindWithHash(HashResult primary, const K& key, const E& eq) {
+    Entry* ret = GetFromBucket(primary, primary & bucket_mask_, key, eq);
     if (ret) {
       return ret;
     }
-    return GetFromBucket(primary, HashSecondary(primary) & bucket_mask_, key);
+    return GetFromBucket(primary, HashSecondary(primary) & bucket_mask_, key,
+                         eq);
   }
 
   // Secondary hash value
@@ -411,9 +400,13 @@ class CuckooMap {
   }
 
   // Primary hash value
-  virtual HashResult Hash(const K& key) const { return H(key) | (1u << 31); }
+  HashResult Hash(const K& key, const H& hasher) const {
+    return hasher(key) | (1u << 31);
+  }
 
-  virtual bool Eq(const K& lhs, const K& rhs) const { return E(lhs, rhs); }
+  bool Eq(const K& lhs, const K& rhs, const E& eq) const {
+    return eq(lhs, rhs);
+  }
 
   // Resize the space of entries. Grow less aggressively than buckets.
   void ExpandEntries() {
@@ -446,34 +439,6 @@ class CuckooMap {
 
   // Stack of free entries
   std::stack<EntryIndex> free_entry_indices_;
-};
-
-template <typename K>
-using HashFuncWithVariableKeySize = HashResult (*)(const K& key,
-                                                   size_t key_size);
-
-template <typename K>
-using EqFuncWithVariableKeySize = bool (*)(const K& lhs, const K& rhs,
-                                           size_t key_size);
-
-template <typename K, typename V, HashFunc<K> H_, EqFunc<K> E_,
-          HashFuncWithVariableKeySize<K> H, EqFuncWithVariableKeySize<K> E>
-class CuckooMapWithVariableKeySize : public CuckooMap<K, V, H_, E_> {
- public:
-  CuckooMapWithVariableKeySize() : key_size_(sizeof(K)) {}
-  void SetKeySize(size_t size) { key_size_ = size; }
-
- private:
-  virtual HashResult Hash(const K& key) const {
-    return H(key, key_size_) | (1u << 31);
-  }
-
-  virtual bool Eq(const K& lhs, const K& rhs) const {
-    return E(lhs, rhs, key_size_);
-  }
-
-  // size of keys, in bytes
-  size_t key_size_;
 };
 
 }  // namespace utils
