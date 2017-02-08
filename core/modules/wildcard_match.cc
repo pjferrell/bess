@@ -8,31 +8,12 @@
 
 using bess::metadata::Attribute;
 
-/* k1 = k2 & mask */
-static void mask(void *k1, const void *k2, const void *mask, int key_size) {
-  uint64_t *a = static_cast<uint64_t *>(k1);
-  const uint64_t *b = reinterpret_cast<const uint64_t *>(k2);
-  const uint64_t *m = reinterpret_cast<const uint64_t *>(mask);
-
-  switch (key_size >> 3) {
-    default:
-      promise_unreachable();
-    case 8:
-      a[7] = b[7] & m[7];
-    case 7:
-      a[6] = b[6] & m[6];
-    case 6:
-      a[5] = b[5] & m[5];
-    case 5:
-      a[4] = b[4] & m[4];
-    case 4:
-      a[3] = b[3] & m[3];
-    case 3:
-      a[2] = b[2] & m[2];
-    case 2:
-      a[1] = b[1] & m[1];
-    case 1:
-      a[0] = b[0] & m[0];
+// dst = src & mask. len must be a multiple of sizeof(uint64_t)
+static inline void mask(wm_hkey_t *dst, const wm_hkey_t &src,
+                        const wm_hkey_t &mask, size_t len) {
+  promise(len > 0);
+  for (size_t i = 0; i < len / 8; i++) {
+    dst->u64_arr[i] = src.u64_arr[i] & mask.u64_arr[i];
   }
 }
 
@@ -113,18 +94,16 @@ pb_error_t WildcardMatch::Init(const bess::pb::WildcardMatchArg &arg) {
   return pb_errno(0);
 }
 
-inline gate_idx_t WildcardMatch::LookupEntry(wm_hkey_t *key,
+inline gate_idx_t WildcardMatch::LookupEntry(const wm_hkey_t &key,
                                              gate_idx_t def_gate) {
   struct WmData result = {
       .priority = INT_MIN, .ogate = def_gate,
   };
 
-  const int key_size = total_key_size_;
-
   wm_hkey_t key_masked;
 
   for (auto &tuple : tuples_) {
-    mask(&key_masked, key, &tuple.mask, key_size);
+    mask(&key_masked, key, tuple.mask, total_key_size_);
     auto *entry = tuple.ht.Find(key_masked);
 
     if (entry && entry->second.priority >= result.priority) {
@@ -171,40 +150,9 @@ void WildcardMatch::ProcessBatch(bess::PacketBatch *batch) {
     }
   }
 
-#if 1
   for (int i = 0; i < cnt; i++) {
-    out_gates[i] = LookupEntry(&keys[i], default_gate);
+    out_gates[i] = LookupEntry(keys[i], default_gate);
   }
-#else
-  /* A version with an outer loop for tuples and an inner loop for pkts.
-   * Significantly slower. */
-
-  int priorities[bess::PacketBatch::kMaxBurst];
-  const int key_size = total_key_size_;
-
-  for (int i = 0; i < cnt; i++) {
-    priorities[i] = INT_MIN;
-    out_gates[i] = default_gate;
-  }
-
-  for (const auto &tuple : tuples_) {
-    const wm_hkey_t *tuple_mask = &tuple.mask;
-
-    for (int j = 0; j < cnt; j++) {
-      wm_hkey_t key_masked;
-      struct WmData *cand;
-
-      mask(&key_masked, keys[j], tuple_mask, key_size);
-
-      cand = tuple.ht.Get(&key_masked);
-
-      if (cand && cand->priority >= priorities[j]) {
-        out_gates[j] = cand->ogate;
-        priorities[j] = cand->priority;
-      }
-    }
-  }
-#endif
 
   RunSplit(out_gates, batch);
 }
@@ -268,11 +216,10 @@ pb_error_t WildcardMatch::ExtractKeyMask(const T &arg, wm_hkey_t *key,
 }
 
 int WildcardMatch::FindTuple(wm_hkey_t *mask) {
-  int key_size = total_key_size_;
   int i = 0;
 
   for (const auto &tuple : tuples_) {
-    if (memcmp(&tuple.mask, mask, key_size) == 0) {
+    if (memcmp(&tuple.mask, mask, total_key_size_) == 0) {
       return i;
     }
     i++;
@@ -315,8 +262,8 @@ pb_cmd_response_t WildcardMatch::CommandAdd(
   gate_idx_t gate = arg.gate();
   int priority = arg.priority();
 
-  wm_hkey_t key;
-  wm_hkey_t mask;
+  wm_hkey_t key = {};
+  wm_hkey_t mask = {};
 
   struct WmData data;
 

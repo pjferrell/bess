@@ -21,7 +21,7 @@ static_assert(MAX_FIELD_SIZE <= sizeof(uint64_t),
 #endif
 
 using google::protobuf::RepeatedPtrField;
-using bess::utils::CuckooMap;
+using bess::utils::HashResult;
 using bess::utils::CuckooMapWithVariableKeySize;
 
 struct em_hkey_t {
@@ -63,7 +63,8 @@ inline bool em_keyeq(const em_hkey_t &lhs, const em_hkey_t &rhs, size_t len) {
   return true;
 }
 
-inline size_t em_hash(const em_hkey_t &key, size_t init_val, size_t len) {
+inline HashResult em_hash(const em_hkey_t &key, size_t len) {
+  HashResult init_val = 0;
 #if __SSE4_2__ && __x86_64
   const uint64_t *a = key.u64_arr;
 
@@ -98,8 +99,8 @@ inline bool em_keyeq_fixed(const em_hkey_t &lhs, const em_hkey_t &rhs) {
   return em_keyeq(lhs, rhs, sizeof(em_hkey_t));
 }
 
-inline size_t em_hash_fixed(const em_hkey_t &key, size_t init_val) {
-  return em_hash(key, init_val, sizeof(em_hkey_t));
+inline HashResult em_hash_fixed(const em_hkey_t &key) {
+  return em_hash(key, sizeof(em_hkey_t));
 }
 
 typedef CuckooMapWithVariableKeySize<em_hkey_t, gate_idx_t, em_hash_fixed,

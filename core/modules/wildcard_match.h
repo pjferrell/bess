@@ -9,7 +9,7 @@
 #include "../module_msg.pb.h"
 #include "../utils/cuckoo_map.h"
 
-using bess::utils::CuckooMap;
+using bess::utils::HashResult;
 using bess::utils::CuckooMapWithVariableKeySize;
 
 #define MAX_TUPLES 8
@@ -69,65 +69,22 @@ class WildcardMatch final : public Module {
 
  private:
   static bool wm_keyeq(const wm_hkey_t &lhs, const wm_hkey_t &rhs, size_t len) {
-    const uint64_t *a = lhs.u64_arr;
-    const uint64_t *b = rhs.u64_arr;
-
-    switch (len >> 3) {
-      default:
-        promise_unreachable();
-      case 8:
-        if (unlikely(a[7] != b[7]))
-          return false;
-      case 7:
-        if (unlikely(a[6] != b[6]))
-          return false;
-      case 6:
-        if (unlikely(a[5] != b[5]))
-          return false;
-      case 5:
-        if (unlikely(a[4] != b[4]))
-          return false;
-      case 4:
-        if (unlikely(a[3] != b[3]))
-          return false;
-      case 3:
-        if (unlikely(a[2] != b[2]))
-          return false;
-      case 2:
-        if (unlikely(a[1] != b[1]))
-          return false;
-      case 1:
-        if (unlikely(a[0] != b[0]))
-          return false;
+    promise(len > 0);
+    for (size_t i = 0; i < len / 8; i++) {
+      if (lhs.u64_arr[i] != rhs.u64_arr[i]) {
+        return false;
+      }
     }
-
     return true;
   }
 
-  static size_t wm_hash(const wm_hkey_t &key, size_t init_val, size_t len) {
+  static HashResult wm_hash(const wm_hkey_t &key, size_t len) {
+    HashResult init_val = 0;
+    promise(len > 0);
 #if __SSE4_2__ && __x86_64
-    const uint64_t *a = key.u64_arr;
-    switch (len >> 3) {
-      default:
-        promise_unreachable();
-      case 8:
-        init_val = crc32c_sse42_u64(*a++, init_val);
-      case 7:
-        init_val = crc32c_sse42_u64(*a++, init_val);
-      case 6:
-        init_val = crc32c_sse42_u64(*a++, init_val);
-      case 5:
-        init_val = crc32c_sse42_u64(*a++, init_val);
-      case 4:
-        init_val = crc32c_sse42_u64(*a++, init_val);
-      case 3:
-        init_val = crc32c_sse42_u64(*a++, init_val);
-      case 2:
-        init_val = crc32c_sse42_u64(*a++, init_val);
-      case 1:
-        init_val = crc32c_sse42_u64(*a++, init_val);
+    for (size_t i = 0; i < len / 8; i++) {
+      init_val = crc32c_sse42_u64(key.u64_arr[i], init_val);
     }
-
     return init_val;
 #else
     return rte_hash_crc(&key, key.key_len, init_val);
@@ -138,8 +95,8 @@ class WildcardMatch final : public Module {
     return wm_keyeq(lhs, rhs, sizeof(wm_hkey_t));
   }
 
-  static size_t wm_hash_fixed(const wm_hkey_t &key, size_t init_val) {
-    return wm_hash(key, init_val, sizeof(wm_hkey_t));
+  static HashResult wm_hash_fixed(const wm_hkey_t &key) {
+    return wm_hash(key, sizeof(wm_hkey_t));
   }
 
   struct WmTuple {
@@ -149,7 +106,7 @@ class WildcardMatch final : public Module {
     wm_hkey_t mask;
   };
 
-  gate_idx_t LookupEntry(wm_hkey_t *key, gate_idx_t def_gate);
+  gate_idx_t LookupEntry(const wm_hkey_t &key, gate_idx_t def_gate);
 
   pb_error_t AddFieldOne(const bess::pb::WildcardMatchArg_Field &field,
                          struct WmField *f);

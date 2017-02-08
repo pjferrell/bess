@@ -19,6 +19,7 @@
 
 using bess::utils::IPAddress;
 using bess::utils::CIDRNetwork;
+using bess::utils::HashResult;
 using bess::utils::CuckooMap;
 
 const uint16_t MIN_PORT = 1024;
@@ -175,7 +176,8 @@ class NAT final : public Module {
     }
   }
 
-  static inline size_t FlowHash(const Flow &key, size_t init_val) {
+  static inline HashResult FlowHash(const Flow &key) {
+    HashResult init_val = 0;
 #if __SSE4_2__ && __x86_64
     init_val = crc32c_sse42_u64(key.e1, init_val);
     init_val = crc32c_sse42_u64(key.e2, init_val);
